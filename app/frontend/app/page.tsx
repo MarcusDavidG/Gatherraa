@@ -1,6 +1,9 @@
 import Link from "next/link";
 import { PublicLayout } from "@/components/layout";
 import { Card } from "@/components/ui";
+import { WalletButton } from "@/components/wallet/WalletButton";
+import { WalletAddress } from "@/components/wallet/WalletAddress";
+import { WrongNetworkAlert } from "@/components/wallet/WrongNetworkAlert";
 
 export default function Home() {
   return (
@@ -9,6 +12,14 @@ export default function Home() {
       subtitle="Track your contributions, earnings, and missions in one place."
       className="flex items-center"
     >
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <WrongNetworkAlert />
+        <div className="flex items-center gap-2 self-end sm:self-auto">
+          <WalletAddress />
+          <WalletButton />
+        </div>
+      </div>
+
       <Card className="w-full">
         <div className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
           <div className="max-w-2xl">

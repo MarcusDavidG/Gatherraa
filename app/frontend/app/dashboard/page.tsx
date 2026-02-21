@@ -5,6 +5,9 @@ import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YA
 import { ArrowDownToLine, Clock, DollarSign, TrendingUp } from 'lucide-react';
 import { DashboardLayout } from '@/components/layout';
 import { Badge, Button, Card, Modal } from '@/components/ui';
+import { WalletButton } from '@/components/wallet/WalletButton';
+import { WalletAddress } from '@/components/wallet/WalletAddress';
+import { WrongNetworkAlert } from '@/components/wallet/WrongNetworkAlert';
 
 const earningsData = [
   { month: 'Jan', earnings: 1200 },
@@ -84,12 +87,20 @@ export default function ContributorDashboard() {
       title="Contributor Dashboard"
       subtitle="Track your earnings and mission delivery in one place."
       actions={
-        <Button onClick={() => setShowWithdrawModal(true)}>
-          <ArrowDownToLine className="h-4 w-4" />
-          Withdraw
-        </Button>
+        <div className="flex items-center gap-2">
+          <WalletAddress />
+          <WalletButton />
+          <Button onClick={() => setShowWithdrawModal(true)}>
+            <ArrowDownToLine className="h-4 w-4" />
+            Withdraw
+          </Button>
+        </div>
       }
     >
+      <div className="mb-6">
+        <WrongNetworkAlert />
+      </div>
+
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-4">
         {stats.map((stat) => (
           <Card key={stat.label} className="p-5">

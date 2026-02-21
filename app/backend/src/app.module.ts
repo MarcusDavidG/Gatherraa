@@ -11,6 +11,8 @@ import { EventsModule } from './events/events.module';
 import { ReviewsModule } from './reviews/reviews.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ScheduleModule } from '@nestjs/schedule';
+import { SearchModule } from './search/search.module';
+import { HelpCenterModule } from './help-center/help-center.module';
 
 @Module({
   imports: [
@@ -33,6 +35,8 @@ import { ScheduleModule } from '@nestjs/schedule';
     EventsModule,
     ReviewsModule,
     NotificationsModule,
+    SearchModule,
+    HelpCenterModule,
   ],
   controllers: [AppController],
   providers: [AppService],
