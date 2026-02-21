@@ -17,6 +17,7 @@ import { HelpCenterModule } from './help-center/help-center.module';
 import { CategoriesModule } from './categories/categories.module';
 import { TagsModule } from './tags/tags.module';
 import { PaymentsModule } from './payments/payments.module';
+import { TaskQueueModule } from './task-queue/task-queue.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { PaymentsModule } from './payments/payments.module';
     HelpCenterModule,
     CategoriesModule,
     TagsModule,
+    TaskQueueModule,
   ],
   controllers: [AppController],
   providers: [AppService],
