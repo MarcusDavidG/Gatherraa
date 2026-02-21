@@ -12,6 +12,7 @@ import { ReviewsModule } from './reviews/reviews.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { SearchModule } from './search/search.module';
+import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { HelpCenterModule } from './help-center/help-center.module';
 
 @Module({
@@ -36,6 +37,7 @@ import { HelpCenterModule } from './help-center/help-center.module';
     ReviewsModule,
     NotificationsModule,
     SearchModule,
+    RateLimitModule,
     HelpCenterModule,
   ],
   controllers: [AppController],
