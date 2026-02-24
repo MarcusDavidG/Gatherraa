@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, ReactNode } from 'react';
 import { db, OfflineEvent, SyncStatus } from './db';
 import { processAllPending, getPendingSyncItems } from './syncQueue';
-import { getUnresolvedConflicts, ConflictRecord } from './conflictResolver';
+import { getUnresolvedConflicts, type ConflictRecord } from './conflictResolver';
 import { useLiveQuery } from 'dexie-react-hooks';
 import type { SyncState as SyncStateType } from './OfflineContext';
 
