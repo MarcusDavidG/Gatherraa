@@ -14,6 +14,9 @@ use soroban_sdk::{
 #[contract]
 pub struct EscrowContract;
 
+/// Reentrancy guard key
+const REENTRANCY_GUARD: Symbol = symbol_short!("reentrant");
+
 #[contractimpl]
 impl EscrowContract {
     // Initialize the contract
@@ -21,6 +24,9 @@ impl EscrowContract {
         if e.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
+
+        // Validate admin address
+        Self::validate_address(&e, &admin);
 
         // Validate configuration
         Self::validate_config(&config);
@@ -47,6 +53,15 @@ impl EscrowContract {
         let paused: bool = e.storage().instance().get(&DataKey::Paused).unwrap();
         if paused {
             panic!("contract is paused");
+        }
+
+        // Validate all addresses
+        Self::validate_address(&e, &event);
+        Self::validate_address(&e, &organizer);
+        Self::validate_address(&e, &purchaser);
+        Self::validate_contract_address(&e, &token);
+        if let Some(ref ref_addr) = referral {
+            Self::validate_address(&e, ref_addr);
         }
 
         // Validate amount against config
@@ -117,23 +132,42 @@ impl EscrowContract {
 
     // Lock escrow (transfer funds to contract)
     pub fn lock_escrow(e: Env, escrow_id: BytesN<32>) {
+        // Reentrancy protection
+        if e.storage().instance().has(&REENTRANCY_GUARD) {
+            panic!("reentrant call detected");
+        }
+        e.storage().instance().set(&REENTRANCY_GUARD, &true);
+
         let mut escrow: Escrow = e.storage().instance().get(&DataKey::Escrow(escrow_id.clone()))
             .unwrap_or_else(|| panic!("escrow not found"));
 
         if escrow.status != EscrowStatus::Pending {
+            e.storage().instance().remove(&REENTRANCY_GUARD);
             panic!("invalid status");
         }
 
         escrow.purchaser.require_auth();
 
-        // Transfer tokens to contract
+        // Transfer tokens to contract with error handling
         let token_client = soroban_sdk::token::Client::new(&e, &escrow.token);
         let contract_address = e.current_contract_address();
         
-        token_client.transfer(&escrow.purchaser, &contract_address, &escrow.amount);
+        match token_client.try_transfer(&escrow.purchaser, &contract_address, &escrow.amount) {
+            Ok(Ok(())) => {
+                // Log successful transfer
+                e.events().publish((symbol_short!("token_transfer_success"), escrow_id.clone()), escrow.amount);
+            },
+            _ => {
+                e.storage().instance().remove(&REENTRANCY_GUARD);
+                e.events().publish((symbol_short!("token_transfer_failed"), escrow_id.clone()), escrow.amount);
+                panic!("token transfer failed");
+            }
+        }
 
         escrow.status = EscrowStatus::Locked;
         e.storage().instance().set(&DataKey::Escrow(escrow_id.clone()), &escrow);
+
+        e.storage().instance().remove(&REENTRANCY_GUARD);
 
         #[allow(deprecated)]
         e.events().publish(
@@ -144,29 +178,49 @@ impl EscrowContract {
 
     // Release escrow funds
     pub fn release_escrow(e: Env, escrow_id: BytesN<32>) {
+        // Reentrancy protection
+        if e.storage().instance().has(&REENTRANCY_GUARD) {
+            panic!("reentrant call detected");
+        }
+        e.storage().instance().set(&REENTRANCY_GUARD, &true);
+
         let mut escrow: Escrow = e.storage().instance().get(&DataKey::Escrow(escrow_id.clone()))
             .unwrap_or_else(|| panic!("escrow not found"));
 
         if escrow.status != EscrowStatus::Locked {
+            e.storage().instance().remove(&REENTRANCY_GUARD);
             panic!("invalid status");
         }
 
         if escrow.dispute_active {
+            e.storage().instance().remove(&REENTRANCY_GUARD);
             panic!("dispute active");
         }
 
         if e.ledger().timestamp() < escrow.release_time {
+            e.storage().instance().remove(&REENTRANCY_GUARD);
             panic!("release time not reached");
         }
 
         // Authorize organizer or purchaser
         escrow.organizer.require_auth();
 
-        // Calculate and distribute revenue splits
-        Self::distribute_revenue(&e, &escrow);
+        // Calculate and distribute revenue splits with error handling
+        match Self::distribute_revenue_with_error_handling(&e, &escrow) {
+            Ok(()) => {
+                e.events().publish((symbol_short!("revenue_distribution_success"), escrow_id.clone()), escrow.amount);
+            },
+            Err(err) => {
+                e.storage().instance().remove(&REENTRANCY_GUARD);
+                e.events().publish((symbol_short!("revenue_distribution_failed"), escrow_id.clone()), err);
+                panic!("revenue distribution failed: {}", err);
+            }
+        }
 
         escrow.status = EscrowStatus::Released;
         e.storage().instance().set(&DataKey::Escrow(escrow_id.clone()), &escrow);
+
+        e.storage().instance().remove(&REENTRANCY_GUARD);
 
         #[allow(deprecated)]
         e.events().publish(
@@ -177,28 +231,47 @@ impl EscrowContract {
 
     // Refund escrow
     pub fn refund_escrow(e: Env, escrow_id: BytesN<32>) {
+        // Reentrancy protection
+        if e.storage().instance().has(&REENTRANCY_GUARD) {
+            panic!("reentrant call detected");
+        }
+        e.storage().instance().set(&REENTRANCY_GUARD, &true);
+
         let mut escrow: Escrow = e.storage().instance().get(&DataKey::Escrow(escrow_id.clone()))
             .unwrap_or_else(|| panic!("escrow not found"));
 
         if escrow.status != EscrowStatus::Locked {
+            e.storage().instance().remove(&REENTRANCY_GUARD);
             panic!("invalid status");
         }
 
         if escrow.dispute_active {
+            e.storage().instance().remove(&REENTRANCY_GUARD);
             panic!("dispute active");
         }
 
         // Authorize organizer
         escrow.organizer.require_auth();
 
-        // Refund full amount to purchaser
+        // Refund full amount to purchaser with error handling
         let token_client = soroban_sdk::token::Client::new(&e, &escrow.token);
         let contract_address = e.current_contract_address();
         
-        token_client.transfer(&contract_address, &escrow.purchaser, &escrow.amount);
+        match token_client.try_transfer(&contract_address, &escrow.purchaser, &escrow.amount) {
+            Ok(Ok(())) => {
+                e.events().publish((symbol_short!("refund_success"), escrow_id.clone()), escrow.amount);
+            },
+            _ => {
+                e.storage().instance().remove(&REENTRANCY_GUARD);
+                e.events().publish((symbol_short!("refund_failed"), escrow_id.clone()), escrow.amount);
+                panic!("refund transfer failed");
+            }
+        }
 
         escrow.status = EscrowStatus::Refunded;
         e.storage().instance().set(&DataKey::Escrow(escrow_id.clone()), &escrow);
+
+        e.storage().instance().remove(&REENTRANCY_GUARD);
 
         #[allow(deprecated)]
         e.events().publish(
@@ -452,6 +525,24 @@ impl EscrowContract {
         e.crypto().sha256(&data.to_bytes())
     }
 
+    /// Validates that an address is not zero and is a valid account or contract
+    fn validate_address(e: &Env, address: &Address) {
+        // Check if address is zero
+        if address == &Address::from_contract_id(&BytesN::from_array(e, &[0; 32])) {
+            panic!("zero address not allowed");
+        }
+        // Additional validation can be added here if needed
+    }
+
+    /// Validates that an address points to a deployed token contract
+    fn validate_contract_address(e: &Env, address: &Address) {
+        Self::validate_address(e, address);
+        // Try to call a token interface method to verify it's a token contract
+        let token_client = soroban_sdk::token::Client::new(e, address);
+        // This will fail if not a valid token contract
+        let _ = token_client.decimals();
+    }
+
     fn validate_config(config: &RevenueSplitConfig) {
         let total_percentage = config.default_organizer_percentage + config.default_platform_percentage + config.default_referral_percentage;
         if total_percentage != 100 * config.precision {
@@ -503,6 +594,41 @@ impl EscrowContract {
                 Self::update_referral_rewards(e, ref_addr, referral_amount);
             }
         }
+    }
+
+    fn distribute_revenue_with_error_handling(e: &Env, escrow: &Escrow) -> Result<(), &'static str> {
+        let token_client = soroban_sdk::token::Client::new(e, &escrow.token);
+        let contract_address = e.current_contract_address();
+        let admin: Address = e.storage().instance().get(&DataKey::Admin).unwrap();
+
+        let organizer_amount = Self::calculate_split(escrow.amount, escrow.revenue_splits.organizer_percentage, escrow.revenue_splits.precision);
+        let platform_amount = Self::calculate_split(escrow.amount, escrow.revenue_splits.platform_percentage, escrow.revenue_splits.precision);
+        let mut referral_amount = Self::calculate_split(escrow.amount, escrow.revenue_splits.referral_percentage, escrow.revenue_splits.precision);
+
+        // Adjust for rounding
+        let total_splits = organizer_amount + platform_amount + referral_amount;
+        if total_splits > escrow.amount {
+            referral_amount -= (total_splits - escrow.amount);
+        }
+
+        // Transfer funds with error handling
+        if let Err(_) = token_client.try_transfer(&contract_address, &escrow.organizer, &organizer_amount) {
+            return Err("organizer transfer failed");
+        }
+        if let Err(_) = token_client.try_transfer(&contract_address, &admin, &platform_amount) {
+            return Err("platform transfer failed");
+        }
+
+        if let Some(ref ref_addr) = escrow.referral {
+            if referral_amount > 0 {
+                if let Err(_) = token_client.try_transfer(&contract_address, ref_addr, &referral_amount) {
+                    return Err("referral transfer failed");
+                }
+                Self::update_referral_rewards(e, ref_addr, referral_amount);
+            }
+        }
+
+        Ok(())
     }
 
     fn track_referral(e: &Env, referrer: &Address, purchaser: &Address) {

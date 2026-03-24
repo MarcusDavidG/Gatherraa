@@ -88,7 +88,7 @@ impl EventFactoryContract {
 
         // Max length for symbol_short is 9, initialize is 10.
         // Use soroban_sdk::Symbol::new(&e, "initialize")
-        e.invoke_contract::<()>(
+        match e.try_invoke_contract::<()>(
             &event_contract_id,
             &soroban_sdk::Symbol::new(&e, "initialize"),
             vec![
@@ -100,7 +100,15 @@ impl EventFactoryContract {
                 start_time.into_val(&e),
                 refund_cutoff_time.into_val(&e),
             ],
-        );
+        ) {
+            Ok(Ok(())) => {
+                e.events().publish((symbol_short!("contract_init_success"), event_contract_id.clone()), true);
+            },
+            _ => {
+                e.events().publish((symbol_short!("contract_init_failed"), event_contract_id.clone()), true);
+                panic!("failed to initialize event contract");
+            }
+        }
 
         let key = DataKey::OrganizerEvents(organizer.clone());
         let mut events: Vec<Address> = e
