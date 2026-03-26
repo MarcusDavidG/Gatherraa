@@ -13,12 +13,32 @@ use gathera_common::{
 #[contract]
 pub struct StakingContract;
 
+/// The Staking Contract allows users to stake tokens and earn rewards over time.
+///
+/// Key features:
+/// * Tier-based reward multipliers based on staked amount.
+/// * Lock-duration multipliers for long-term stakers.
+/// * Compound rewards (optionally re-stake rewards).
+/// * Early withdrawal penalties.
+/// * Emergency withdrawal with high penalty.
+/// * Role-based access control for slashing and configuration.
 const PRECISION: i128 = 1_000_000_000;
 const ADMIN_ROLE: Symbol = symbol_short!("ADMIN");
 const MOD_ROLE: Symbol = symbol_short!("MOD");
 
 #[contractimpl]
 impl StakingContract {
+    /// Initializes the staking contract.
+    ///
+    /// # Arguments
+    /// * `env` - The current contract environment.
+    /// * `admin` - The address with administrative rights (tiers, roles, upgrades).
+    /// * `staking_token` - The token users will lock in the contract.
+    /// * `reward_token` - The token users will receive as rewards.
+    /// * `reward_rate` - The global reward emission rate per second (scaled).
+    ///
+    /// # Returns
+    /// `Ok(())` if initialization is successful, or `Err(StakingError::AlreadyInitialized)`.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -26,12 +46,10 @@ impl StakingContract {
         reward_token: Address,
         reward_rate: i128,
     ) -> Result<(), StakingError> {
-        // Prevent re-initialization
         if env.storage().instance().has(&crate::types::DataKey::Config) {
             return Err(StakingError::AlreadyInitialized);
         }
 
-        // Validate addresses
         validate_address(&env, &admin);
         validate_token_address(&env, &staking_token);
         validate_token_address(&env, &reward_token);
@@ -46,12 +64,10 @@ impl StakingContract {
         write_last_update_time(&env, env.ledger().timestamp());
         env.storage().instance().set(&DataKey::Version, &1u32);
 
-        // Grant initial admin role
         write_role(&env, ADMIN_ROLE, admin.clone());
 
         extend_instance(&env);
 
-        // Emit event
         env.events().publish(
             (Symbol::new(&env, "initialized"), admin),
             (staking_token, reward_token, reward_rate),
@@ -59,6 +75,12 @@ impl StakingContract {
         Ok(())
     }
 
+    /// Configures a reward tier.
+    ///
+    /// # Arguments
+    /// * `tier_id` - Unique identifier for the tier.
+    /// * `min_amount` - Minimum staked amount to qualify for this tier.
+    /// * `reward_multiplier` - Multiplier for rewards (100 = 1x).
     pub fn set_tier(env: Env, admin: Address, tier_id: u32, min_amount: i128, reward_multiplier: u32) -> Result<(), StakingError> {
         admin.require_auth();
         if !has_role(&env, ADMIN_ROLE, admin) {
@@ -72,7 +94,6 @@ impl StakingContract {
         write_tier(&env, tier_id, &tier);
         extend_instance(&env);
 
-        // Emit event
         env.events().publish(
             (Symbol::new(&env, "tier_set"), tier_id),
             (min_amount, reward_multiplier),
@@ -80,8 +101,17 @@ impl StakingContract {
         Ok(())
     }
 
+    /// Stakes tokens into the contract.
+    ///
+    /// # Arguments
+    /// * `user` - The staker address.
+    /// * `amount` - Amount of tokens to stake.
+    /// * `lock_duration` - Time in seconds to lock the stake (can increase rewards).
+    /// * `tier_id` - The desired tier (must meet minimum amount).
+    ///
+    /// # Errors
+    /// * [StakingError::InsufficientAmountForTier] if amount is too low for the selected tier.
     pub fn stake(env: Env, user: Address, amount: i128, lock_duration: u64, tier_id: u32) -> Result<(), StakingError> {
-        // Reentrancy protection
         set_reentrancy_guard(&env);
 
         user.require_auth();
@@ -92,7 +122,6 @@ impl StakingContract {
 
         update_reward(&env, Some(&user));
 
-        // Use StorageCache for efficient storage access
         let mut cache = StorageCache::new();
         let config = cache.get_config(&env).clone();
         let tier = read_tier(&env, tier_id).unwrap_or(Tier {
@@ -102,7 +131,6 @@ impl StakingContract {
         let mut total_shares = cache.get_total_shares(&env);
         let reward_per_token_stored = cache.get_reward_per_token_stored(&env);
 
-        // Transfer staking tokens from user to contract with error handling
         let token_client = token::Client::new(&env, &config.staking_token);
         let contract_address = env.current_contract_address();
         
@@ -127,17 +155,13 @@ impl StakingContract {
             tier_id: 0,
         });
 
-        // Update amount
         user_info.amount += amount;
 
-        // Verify tier (using cached tier)
         if user_info.amount < tier.min_amount {
             remove_reentrancy_guard(&env);
             return Err(StakingError::InsufficientAmountForTier);
         }
 
-        // Boosting for long-term stakers: extra multiplier based on duration
-        // E.g., every 30 days (2,592,000s) adds 10% to multiplier
         let boost = (lock_duration as u32 / 2_592_000) * 10;
         let total_multiplier = tier.reward_multiplier + boost;
 
@@ -147,13 +171,11 @@ impl StakingContract {
         user_info.shares = new_shares;
         user_info.tier_id = tier_id;
 
-        // Update lock if they are staking more
         user_info.lock_start_time = env.ledger().timestamp();
         user_info.lock_duration = lock_duration;
 
         write_user_info(&env, &user, &user_info);
 
-        // Update cached total_shares and write once
         total_shares += diff_shares;
         cache.set_total_shares(total_shares);
         write_total_shares(&env, total_shares);
@@ -161,7 +183,6 @@ impl StakingContract {
         remove_reentrancy_guard(&env);
         extend_instance(&env);
 
-        // Emit event
         env.events().publish(
             (Symbol::new(&env, "staked"), user),
             (amount, lock_duration, tier_id),
@@ -169,14 +190,16 @@ impl StakingContract {
         Ok(())
     }
 
+    /// Claims accumulated rewards.
+    ///
+    /// # Arguments
+    /// * `compound` - If true, rewards are re-staked instead of being transferred.
     pub fn claim(env: Env, user: Address, compound: bool) -> Result<(), StakingError> {
-        // Reentrancy protection
         set_reentrancy_guard(&env);
 
         user.require_auth();
         update_reward(&env, Some(&user));
 
-        // Cache frequently accessed storage values
         let config = read_config(&env);
         let mut total_shares = read_total_shares(&env);
 
@@ -190,13 +213,11 @@ impl StakingContract {
             let reward_token = token::Client::new(&env, &config.reward_token);
 
             if compound {
-                // To compound, we would stake the reward. But reward token and staking token might differ.
                 if config.staking_token != config.reward_token {
                     remove_reentrancy_guard(&env);
                     return Err(StakingError::RewardTokenDiffers);
                 }
 
-                // Keep the reward in contract, just update shares and total shares
                 let tier = read_tier(&env, user_info.tier_id).unwrap_or(Tier {
                     min_amount: 0,
                     reward_multiplier: 100,
@@ -211,7 +232,6 @@ impl StakingContract {
                 user_info.shares = new_shares;
                 write_user_info(&env, &user, &user_info);
 
-                // Update cached total_shares and write once
                 total_shares += diff_shares;
                 write_total_shares(&env, total_shares);
             } else {
@@ -231,7 +251,6 @@ impl StakingContract {
         remove_reentrancy_guard(&env);
         extend_instance(&env);
 
-        // Emit event
         env.events().publish(
             (Symbol::new(&env, "claimed"), user),
             (reward, if compound { 1u32 } else { 0u32 }),
@@ -239,8 +258,14 @@ impl StakingContract {
         Ok(())
     }
 
+    /// Unstakes tokens.
+    ///
+    /// # Arguments
+    /// * `amount` - Amount of tokens to unstake.
+    ///
+    /// # Returns
+    /// Note: If withdrawn before lock expiry, a 20% penalty is applied.
     pub fn unstake(env: Env, user: Address, amount: i128) -> Result<(), StakingError> {
-        // Reentrancy protection
         set_reentrancy_guard(&env);
 
         user.require_auth();
@@ -251,7 +276,6 @@ impl StakingContract {
 
         update_reward(&env, Some(&user));
 
-        // Cache frequently accessed storage values
         let config = read_config(&env);
         let mut total_shares = read_total_shares(&env);
 
@@ -264,22 +288,18 @@ impl StakingContract {
         let mut actual_amount = amount;
         let current_time = env.ledger().timestamp();
 
-        // Early withdrawal penalty
         if current_time < user_info.lock_start_time + user_info.lock_duration {
-            // Apply 20% penalty
             let penalty = (amount * 20) / 100;
             actual_amount = amount - penalty;
         }
 
         user_info.amount -= amount;
 
-        // Cache tier reads to avoid redundant storage access
         let tier = read_tier(&env, user_info.tier_id).unwrap_or(Tier {
             min_amount: 0,
             reward_multiplier: 100,
         });
         if user_info.amount > 0 && user_info.amount < tier.min_amount {
-            // Drop to base multiplier
             user_info.tier_id = 0;
         }
 
@@ -296,7 +316,6 @@ impl StakingContract {
 
         write_user_info(&env, &user, &user_info);
 
-        // Update cached total_shares and write once
         total_shares -= diff_shares;
         write_total_shares(&env, total_shares);
 
@@ -315,7 +334,6 @@ impl StakingContract {
         remove_reentrancy_guard(&env);
         extend_instance(&env);
 
-        // Emit event
         env.events().publish(
             (Symbol::new(&env, "unstaked"), user),
             (amount, actual_amount),

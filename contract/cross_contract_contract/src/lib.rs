@@ -21,9 +21,18 @@ use soroban_sdk::{
 #[contract]
 pub struct CrossContractContract;
 
+/// The Cross-Contract Orchestrator manages complex interactions between multiple contracts.
+///
+/// It provides a centralized registry for contract discovery, handles atomic multi-call operations
+/// (all-or-nothing), manages contract dependencies to prevent circular loops, and implements a
+/// callback system for asynchronous-like behavior in Soroban.
 #[contractimpl]
 impl CrossContractContract {
-    // Initialize the contract
+    /// Initializes the orchestrator and all its registries.
+    ///
+    /// # Arguments
+    /// * `env` - The current contract environment.
+    /// * `admin` - The global administrator address.
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
@@ -33,36 +42,45 @@ impl CrossContractContract {
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::Version, &1u32);
         
-        // Initialize registries
         let registry = ContractRegistry {
-            contracts: map![&e],
-            contract_types: map![&e],
-            contract_versions: map![&e],
+            contracts: Map::new(&env),
+            contract_types: Map::new(&env),
+            contract_versions: Map::new(&env),
         };
         env.storage().instance().set(&DataKey::ContractRegistry, &registry);
         
         let callback_registry = CallbackRegistry {
-            callbacks: map![&e],
-            active_callbacks: Vec::new(&e),
+            callbacks: Map::new(&env),
+            active_callbacks: Vec::new(&env),
         };
         env.storage().instance().set(&DataKey::CallbackRegistry, &callback_registry);
         
         let dependency_graph = DependencyGraph {
-            nodes: map![&e],
-            edges: Vec::new(&e),
+            nodes: Map::new(&env),
+            edges: Vec::new(&env),
         };
         env.storage().instance().set(&DataKey::DependencyGraph, &dependency_graph);
         
         let operation_queue = OperationQueue {
-            pending_operations: Vec::new(&e),
-            processing_operations: Vec::new(&e),
-            completed_operations: Vec::new(&e),
-            failed_operations: Vec::new(&e),
+            pending_operations: Vec::new(&env),
+            processing_operations: Vec::new(&env),
+            completed_operations: Vec::new(&env),
+            failed_operations: Vec::new(&env),
         };
         env.storage().instance().set(&DataKey::OperationQueue, &operation_queue);
     }
 
-    // Register a contract
+    /// Registers a contract in the ecosystem and configures its permissions.
+    ///
+    /// # Arguments
+    /// * `contract_address` - The address of the contract to register.
+    /// * `contract_type` - Symbolic category for discovery.
+    /// * `version` - Version of the contract.
+    /// * `permissions` - Access control rules for cross-contract interactions.
+    /// * `dependencies` - List of contracts this one depends on.
+    ///
+    /// # Errors
+    /// Returns [CrossContractError::CircularDependency] if the new registration creates a loop.
     pub fn register_contract(
         env: Env,
         contract_address: Address,
@@ -70,7 +88,7 @@ impl CrossContractContract {
         version: u32,
         permissions: ContractPermissions,
         dependencies: Vec<Address>,
-    ) {
+    ) -> Result<(), CrossContractError> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -148,15 +166,24 @@ impl CrossContractContract {
         result
     }
 
-    // Execute atomic operation
+    /// Executes a sequence of contract calls atomically.
+    ///
+    /// If any call marked with `requires_success` fails, all previous calls in the sequence
+    /// will be rolled back using their registered rollback functions.
+    ///
+    /// # Arguments
+    /// * `operations` - Vector of contract calls to execute.
+    /// * `timeout` - Seconds after which the operation is considered failed if not complete.
+    ///
+    /// # Returns
+    /// Unique ID for the atomic operation.
     pub fn execute_atomic_operation(
         env: Env,
         operations: Vec<ContractCall>,
         timeout: u64,
-    ) -> BytesN<32> {
+    ) -> Result<BytesN<32>, CrossContractError> {
         let caller = env.current_contract_address();
         
-        // Generate operation ID
         let operation_id = Self::generate_operation_id(&env, &caller, &operations);
         
         let atomic_op = AtomicOperation {
@@ -165,22 +192,19 @@ impl CrossContractContract {
             status: OperationStatus::Pending,
             created_at: env.ledger().timestamp(),
             timeout,
-            rollback_data: Vec::new(&e),
+            rollback_data: Vec::new(&env),
             caller: caller.clone(),
         };
 
-        // Store operation
         env.storage().instance().set(&DataKey::AtomicOperation(operation_id.clone()), &atomic_op);
         
-        // Add to queue
         let mut queue: OperationQueue = env.storage().instance().get(&DataKey::OperationQueue).unwrap();
         queue.pending_operations.push_back(operation_id.clone());
         env.storage().instance().set(&DataKey::OperationQueue, &queue);
 
-        // Execute operations
         Self::execute_operations(&env, operation_id.clone())?;
 
-        operation_id
+        Ok(operation_id)
     }
 
     // Register callback
@@ -228,7 +252,7 @@ impl CrossContractContract {
         let registry: CallbackRegistry = env.storage().instance().get(&DataKey::CallbackRegistry).unwrap();
         
         // Find matching callbacks
-        let mut callbacks_to_execute = Vec::new(&e);
+        let mut callbacks_to_execute = Vec::new(&env);
         for callback_id in registry.active_callbacks.iter() {
             if let Some(callback) = registry.callbacks.get(callback_id) {
                 if callback.trigger_contract == trigger_contract && callback.trigger_function == trigger_function {
@@ -295,7 +319,7 @@ impl CrossContractContract {
         let ticket_owner_result = env.invoke_contract::<Address>(
             &ticket_contract,
             &symbol_short!("owner_of"),
-            vec![&e, ticket_id.into_val(&e)],
+            vec![&env, ticket_id.into_val(&env)],
         );
 
         if ticket_owner_result != purchaser {
@@ -306,7 +330,7 @@ impl CrossContractContract {
         let ticket_valid_result = env.invoke_contract::<bool>(
             &event_contract,
             &symbol_short!("is_ticket_valid"),
-            vec![&e, ticket_id.into_val(&e)],
+            vec![&env, ticket_id.into_val(&env)],
         );
 
         ticket_valid_result
@@ -399,7 +423,7 @@ impl CrossContractContract {
     }
 
     // Helper functions
-    fn check_call_permissions(e: &Env, caller: &Address, contract_address: &Address) -> Result<(), CrossContractError> {
+    fn check_call_permissions(env: &Env, caller: &Address, contract_address: &Address) -> Result<(), CrossContractError> {
         let registry: ContractRegistry = env.storage().instance().get(&DataKey::ContractRegistry).unwrap();
         
         if let Some(contract_info) = registry.contracts.get(contract_address.clone()) {
@@ -427,7 +451,7 @@ impl CrossContractContract {
         }
     }
 
-    fn check_circular_dependencies(e: &Env, contract_address: &Address, dependencies: &Vec<Address>) -> Result<(), CrossContractError> {
+    fn check_circular_dependencies(env: &Env, contract_address: &Address, dependencies: &Vec<Address>) -> Result<(), CrossContractError> {
         let graph: DependencyGraph = env.storage().instance().get(&DataKey::DependencyGraph).unwrap();
         
         // Simple DFS to detect cycles
@@ -442,7 +466,7 @@ impl CrossContractContract {
     }
 
     fn has_cycle_dfs(
-        e: &Env,
+        env: &Env,
         graph: &DependencyGraph,
         node: &Address,
         visited: &mut Vec<Address>,
@@ -467,7 +491,7 @@ impl CrossContractContract {
         false
     }
 
-    fn update_dependency_graph(e: &Env, contract_address: &Address, contract_type: &Symbol, dependencies: &Vec<Address>) {
+    fn update_dependency_graph(env: &Env, contract_address: &Address, contract_type: &Symbol, dependencies: &Vec<Address>) {
         let mut graph: DependencyGraph = env.storage().instance().get(&DataKey::DependencyGraph).unwrap();
         
         // Create node
@@ -494,7 +518,7 @@ impl CrossContractContract {
         env.storage().instance().set(&DataKey::DependencyGraph, &graph);
     }
 
-    fn execute_operations(e: &Env, operation_id: BytesN<32>) -> Result<(), CrossContractError> {
+    fn execute_operations(env: &Env, operation_id: BytesN<32>) -> Result<(), CrossContractError> {
         let mut atomic_op: AtomicOperation = env.storage().instance().get(&DataKey::AtomicOperation(operation_id.clone()))
             .ok_or(CrossContractError::OperationNotFound)?;
 
@@ -549,7 +573,7 @@ impl CrossContractContract {
         Ok(())
     }
 
-    fn rollback_operations(e: &Env, atomic_op: &AtomicOperation, failed_index: u32) -> Result<(), CrossContractError> {
+    fn rollback_operations(env: &Env, atomic_op: &AtomicOperation, failed_index: u32) -> Result<(), CrossContractError> {
         // Rollback operations in reverse order
         for i in (0..failed_index).rev() {
             if let Some(rollback_data) = atomic_op.rollback_data.get(i as usize) {
@@ -563,7 +587,7 @@ impl CrossContractContract {
         Ok(())
     }
 
-    fn generate_operation_id(e: &Env, caller: &Address, operations: &Vec<ContractCall>) -> BytesN<32> {
+    fn generate_operation_id(env: &Env, caller: &Address, operations: &Vec<ContractCall>) -> BytesN<32> {
         let mut data = Vec::new(e);
         data.push_back(caller.to_val());
         data.push_back(env.ledger().timestamp().to_val());
@@ -577,7 +601,7 @@ impl CrossContractContract {
         env.crypto().sha256(&data.to_bytes())
     }
 
-    fn generate_callback_id(e: &Env, trigger_contract: &Address, trigger_function: &Symbol) -> BytesN<32> {
+    fn generate_callback_id(env: &Env, trigger_contract: &Address, trigger_function: &Symbol) -> BytesN<32> {
         let mut data = Vec::new(e);
         data.push_back(trigger_contract.to_val());
         data.push_back(trigger_function.to_val());
@@ -586,7 +610,7 @@ impl CrossContractContract {
         env.crypto().sha256(&data.to_bytes())
     }
 
-    fn get_contract_info(e: &Env, contract_address: &Address) -> Result<ContractInfo, CrossContractError> {
+    fn get_contract_info(env: &Env, contract_address: &Address) -> Result<ContractInfo, CrossContractError> {
         let registry: ContractRegistry = env.storage().instance().get(&DataKey::ContractRegistry).unwrap();
         registry.contracts.get(contract_address.clone())
             .ok_or(CrossContractError::ContractNotFound)

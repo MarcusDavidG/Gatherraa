@@ -21,8 +21,21 @@ use crate::error::WhitelistError;
 #[contract]
 pub struct WhitelistContract;
 
+/// The Whitelist Contract manages airdrops and token distributions using Merkle trees for efficiency.
+///
+/// Each campaign represents a separate distribution event with its own Merkle root, token, and deadline.
+/// Users can claim their allocated tokens by providing a valid Merkle proof.
+/// Supports claim delegation and automatic refunds for unclaimed tokens.
 #[contractimpl]
 impl WhitelistContract {
+    /// Initializes the whitelist contract.
+    ///
+    /// # Arguments
+    /// * `env` - The current contract environment.
+    /// * `admin` - The global administrator address.
+    ///
+    /// # Errors
+    /// Returns [WhitelistError::AlreadyInitialized] if already called.
     pub fn init(env: Env, admin: Address) -> Result<(), WhitelistError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(WhitelistError::AlreadyInitialized);
@@ -32,6 +45,17 @@ impl WhitelistContract {
         Ok(())
     }
 
+    /// Creates a new airdrop campaign.
+    ///
+    /// # Arguments
+    /// * `admin` - The address managing this specific campaign.
+    /// * `token` - Token address to be distributed.
+    /// * `root` - Merkle root of the whitelist.
+    /// * `deadline` - Unix timestamp after which claims are disabled.
+    /// * `total_amount` - The total tokens deposited for this campaign.
+    ///
+    /// # Returns
+    /// The unique numeric Campaign ID.
     pub fn create_campaign(
         env: Env,
         admin: Address,
@@ -58,7 +82,6 @@ impl WhitelistContract {
             refunded: false,
         };
 
-        // Transfer tokens from admin to contract
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&campaign.admin, &env.current_contract_address(), &total_amount);
 
@@ -68,6 +91,7 @@ impl WhitelistContract {
         Ok(count)
     }
 
+    /// Updates the Merkle root for a campaign.
     pub fn update_root(env: Env, campaign_id: u32, new_root: BytesN<32>) -> Result<(), WhitelistError> {
         let mut campaign: Campaign = env.storage().persistent().get(&DataKey::Campaign(campaign_id)).ok_or(WhitelistError::CampaignNotFound)?;
         campaign.admin.require_auth();
@@ -77,6 +101,7 @@ impl WhitelistContract {
         Ok(())
     }
 
+    /// Batch updates Merkle roots for multiple campaigns.
     pub fn batch_update_roots(env: Env, campaign_ids: Vec<u32>, new_roots: Vec<BytesN<32>>) -> Result<(), WhitelistError> {
         if campaign_ids.len() != new_roots.len() {
             return Err(WhitelistError::MismatchedLengths);
@@ -90,11 +115,24 @@ impl WhitelistContract {
         Ok(())
     }
 
+    /// Delegated claim rights to another address.
     pub fn delegate_claim(env: Env, campaign_id: u32, delegator: Address, delegatee: Address) {
         delegator.require_auth();
         env.storage().persistent().set(&DataKey::Delegate(campaign_id, delegator), &delegatee);
     }
 
+    /// Claims tokens from a campaign.
+    ///
+    /// # Arguments
+    /// * `campaign_id` - ID of the campaign to claim from.
+    /// * `claimant` - Whitelisted address associated with the allocation.
+    /// * `amount` - Amount allocated to the claimant in the Merkle root.
+    /// * `proof` - Merkle path proof.
+    /// * `recipient` - Optional address to receive tokens (defaults to claimant).
+    ///
+    /// # Errors
+    /// * [WhitelistError::InvalidProof] if verification fails.
+    /// * [WhitelistError::AlreadyClaimed] if the address has already claimed.
     pub fn claim(
         env: Env,
         campaign_id: u32,
@@ -116,7 +154,7 @@ impl WhitelistContract {
         proof: Vec<BytesN<32>>,
         recipient: Option<Address>,
     ) -> Result<(), WhitelistError> {
-        delegateenv.require_auth();
+        delegatee.require_auth();
         
         let stored_delegatee: Address = env.storage().persistent()
             .get(&DataKey::Delegate(campaign_id, delegator.clone()))

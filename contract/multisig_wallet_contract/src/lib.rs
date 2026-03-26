@@ -22,15 +22,27 @@ use gathera_common::{
 #[contract]
 pub struct MultisigWalletContract;
 
+/// The Multisig Wallet Contract provides M-of-N signature governance for managing funds and executing transactions.
+///
+/// Features include daily spending limits, timelocks for large transactions, batch operations,
+/// role-based access control for signers, and emergency freeze capabilities.
 #[contractimpl]
 impl MultisigWalletContract {
-    // Initialize the wallet
+    /// Initializes the multisig wallet with an administrator, configuration, and initial owners.
+    ///
+    /// # Arguments
+    /// * `env` - The current contract environment.
+    /// * `admin` - The address with administrative rights (pause, unpause, freeze).
+    /// * `config` - Initial wallet configuration (M, N, spending limits, etc.).
+    /// * `initial_signers` - List of addresses to be registered as initial owners.
+    ///
+    /// # Panics
+    /// Panics if the contract is already initialized or if the configuration is invalid.
     pub fn initialize(env: Env, admin: Address, config: WalletConfig, initial_signers: Vec<Address>) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
 
-        // Validate config
         Self::validate_config(&config);
 
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -39,28 +51,25 @@ impl MultisigWalletContract {
         env.storage().instance().set(&DataKey::Version, &1u32);
         env.storage().instance().set(&DataKey::Frozen, &false);
         
-        // Initialize nonce manager
         let nonce_manager = NonceManager {
             current_nonce: 0,
-            used_nonces: map![&e],
+            used_nonces: map![&env],
         };
         env.storage().instance().set(&DataKey::Nonce, &nonce_manager);
         
-        // Initialize timelock queue
         let timelock_queue = TimelockQueue {
-            pending: Vec::new(&e),
-            ready: Vec::new(&e),
-            executed: Vec::new(&e),
+            pending: Vec::new(&env),
+            ready: Vec::new(&env),
+            executed: Vec::new(&env),
         };
         env.storage().instance().set(&DataKey::TimelockQueue, &timelock_queue);
         
-        // Add initial signers as owners
         for signer_address in initial_signers.iter() {
             Self::add_signer_internal(&env, signer_address.clone(), Role::Owner, 1);
         }
     }
 
-    // Add a new signer
+    /// Adds a new signer to the wallet. Only callable by the administrator.
     pub fn add_signer(env: Env, signer_address: Address, role: Role, weight: u32) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -68,26 +77,21 @@ impl MultisigWalletContract {
         Self::add_signer_internal(&env, signer_address, role, weight);
     }
 
-    // Remove a signer
+    /// Removes an existing signer from the wallet. Only callable by the administrator.
     pub fn remove_signer(env: Env, signer_address: Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
-        let mut signers: Vec<Signer> = env.storage().persistent().get(&DataKey::Signers).unwrap_or(Vec::new(&e));
+        let mut signers: Vec<Signer> = env.storage().persistent().get(&DataKey::Signers).unwrap_or(Vec::new(&env));
         
-        // Check if signer exists
         let signer_index = signers.iter().position(|s| s.address == signer_address)
             .unwrap_or_else(|| panic!("signer not found"));
 
-        let signer = signers.get(signer_index).unwrap();
-        
-        // Cannot remove if it would make m > n
         let config: WalletConfig = env.storage().instance().get(&DataKey::WalletConfig).unwrap();
         if signers.len() - 1 < config.m {
             panic!("cannot remove signer: would make m > n");
         }
 
-        // Remove signer
         signers.remove(signer_index);
         env.storage().persistent().set(&DataKey::Signers, &signers);
 
@@ -98,7 +102,22 @@ impl MultisigWalletContract {
         );
     }
 
-    // Propose a transaction
+    /// Proposes a new transaction for the wallet.
+    ///
+    /// # Arguments
+    /// * `env` - The current contract environment.
+    /// * `to` - Destination address for the transfer.
+    /// * `token` - Token address to be used.
+    /// * `amount` - Amount of tokens to transfer.
+    /// * `data` - Optional data for a contract call.
+    /// * `proposer` - The address proposing the transaction (must be a signer).
+    /// * `nonce` - Replay protection nonce.
+    ///
+    /// # Returns
+    /// The unique ID of the proposed transaction.
+    ///
+    /// # Errors
+    /// Returns [MultisigError::NonceUsed] if the nonce is invalid.
     pub fn propose_transaction(
         env: Env,
         to: Address,
@@ -107,8 +126,8 @@ impl MultisigWalletContract {
         data: Vec<u8>,
         proposer: Address,
         nonce: u64,
-    ) -> BytesN<32> {
-        if is_paused(&e) {
+    ) -> Result<BytesN<32>, MultisigError> {
+        if is_paused(&env) {
             panic!("contract is paused");
         }
 
@@ -117,18 +136,14 @@ impl MultisigWalletContract {
             panic!("wallet is frozen");
         }
 
-        // Validate nonce
         Self::validate_nonce(&env, &proposer, nonce)?;
 
-        // Validate proposer is active signer
         Self::validate_signer(&env, &proposer)?;
 
-        // Generate transaction ID
         let transaction_id = Self::generate_transaction_id(&env, &to, &token, amount, &proposer, nonce);
 
         let config: WalletConfig = env.storage().instance().get(&DataKey::WalletConfig).unwrap();
         
-        // Check if timelock is required
         let timelock_until = if amount >= config.timelock_threshold {
             env.ledger().timestamp().checked_add(config.timelock_duration).expect("Time overflow")
         } else {
@@ -142,7 +157,7 @@ impl MultisigWalletContract {
             amount,
             data: data.clone(),
             proposer: proposer.clone(),
-            signatures: Vec::new(&e),
+            signatures: Vec::new(&env),
             status: TransactionStatus::Proposed,
             created_at: env.ledger().timestamp(),
             expires_at: env.ledger().timestamp().checked_add(config.transaction_expiry).expect("Time overflow"),
@@ -150,17 +165,14 @@ impl MultisigWalletContract {
             batch_id: None,
         };
 
-        // Store transaction
         env.storage().instance().set(&DataKey::Transaction(transaction_id.clone()), &transaction);
 
-        // Add to timelock queue if needed
         if timelock_until > 0 {
             let mut queue: TimelockQueue = env.storage().instance().get(&DataKey::TimelockQueue).unwrap();
             queue.pending.push_back(transaction_id.clone());
             env.storage().instance().set(&DataKey::TimelockQueue, &queue);
         }
 
-        // Mark nonce as used
         Self::use_nonce(&env, &proposer, nonce);
 
         #[allow(deprecated)]
@@ -169,7 +181,7 @@ impl MultisigWalletContract {
             (to, token, amount, proposer),
         );
 
-        transaction_id
+        Ok(transaction_id)
     }
 
     // Sign a transaction
@@ -275,7 +287,7 @@ impl MultisigWalletContract {
         proposer: Address,
         nonce: u64,
     ) -> BytesN<32> {
-        if is_paused(&e) {
+        if is_paused(&env) {
             panic!("contract is paused");
         }
 
@@ -317,7 +329,7 @@ impl MultisigWalletContract {
             id: batch_id.clone(),
             transactions: transactions.clone(),
             proposer: proposer.clone(),
-            signatures: Vec::new(&e),
+            signatures: Vec::new(&env),
             status: BatchStatus::Proposed,
             created_at: env.ledger().timestamp(),
             expires_at: env.ledger().timestamp().checked_add(config.transaction_expiry).expect("Time overflow"),
@@ -483,12 +495,12 @@ impl MultisigWalletContract {
 
     // Admin functions
     pub fn pause(env: Env) {
-        require_admin(&e);
+        require_admin(&env);
         set_paused(&env, true);
     }
 
     pub fn unpause(env: Env) {
-        require_admin(&e);
+        require_admin(&env);
         set_paused(&env, false);
     }
 
@@ -505,7 +517,7 @@ impl MultisigWalletContract {
     }
 
     pub fn get_signers(env: Env) -> Vec<Signer> {
-        env.storage().persistent().get(&DataKey::Signers).unwrap_or(Vec::new(&e))
+        env.storage().persistent().get(&DataKey::Signers).unwrap_or(Vec::new(&env))
     }
 
     pub fn get_transaction(env: Env, transaction_id: BytesN<32>) -> Transaction {
@@ -519,12 +531,12 @@ impl MultisigWalletContract {
     }
 
     pub fn get_daily_spending(env: Env) -> DailySpending {
-        let today = Self::get_today_timestamp(&e);
+        let today = Self::get_today_timestamp(&env);
         env.storage().persistent().get(&DataKey::DailySpending(today))
             .unwrap_or(DailySpending {
                 date: today,
                 spent: 0,
-                limit: Self::get_config(e).daily_spending_limit,
+                limit: Self::get_config(env).daily_spending_limit,
             })
     }
 
@@ -533,7 +545,7 @@ impl MultisigWalletContract {
     }
 
     pub fn version(env: Env) -> u32 {
-        read_version(&e)
+        read_version(&env)
     }
 
     // Helper functions
@@ -560,7 +572,7 @@ impl MultisigWalletContract {
     }
 
     fn add_signer_internal(e: &Env, signer_address: Address, role: Role, weight: u32) {
-        let mut signers: Vec<Signer> = env.storage().persistent().get(&DataKey::Signers).unwrap_or(Vec::new(e));
+        let mut signers: Vec<Signer> = env.storage().persistent().get(&DataKey::Signers).unwrap_or(Vec::new(env));
         
         // Check if signer already exists
         if signers.iter().any(|s| s.address == signer_address) {
@@ -588,7 +600,7 @@ impl MultisigWalletContract {
     }
 
     fn validate_signer(e: &Env, signer: &Address) -> Result<(), MultisigError> {
-        let signers: Vec<Signer> = env.storage().persistent().get(&DataKey::Signers).unwrap_or(Vec::new(e));
+        let signers: Vec<Signer> = env.storage().persistent().get(&DataKey::Signers).unwrap_or(Vec::new(env));
         
         for s in signers.iter() {
             if s.address == signer {

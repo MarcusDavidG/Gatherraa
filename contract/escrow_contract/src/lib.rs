@@ -28,17 +28,28 @@ use gathera_common::{
 #[contract]
 pub struct EscrowContract;
 
+/// The Escrow Contract provides a secure mechanism for holding and releasing funds based on event outcomes, milestones, or disputes.
+///
+/// Features include milestone-based releases, dispute resolution by admin, revenue splitting between organizer/platform/referrers,
+/// and referral tracking.
 #[contractimpl]
 impl EscrowContract {
+    /// Initializes the escrow contract with global settings and administrator.
+    ///
+    /// # Arguments
+    /// * `env` - The current contract environment.
+    /// * `admin` - The address with administrative rights (resolve disputes, pause, upgrades).
+    /// * `config` - Default configuration for revenue splits and limits.
+    ///
+    /// # Panics
+    /// Panics if the contract is already initialized or if the configuration is invalid.
     pub fn initialize(env: Env, admin: Address, config: RevenueSplitConfig) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
 
-        // Validate admin address
         validate_address(&env, &admin);
 
-        // Validate configuration
         Self::validate_config(&config);
 
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -120,13 +131,13 @@ impl EscrowContract {
 
         // Update event escrows
         let event_key = DataKey::EventEscrows(event);
-        let mut event_escrows: Vec<BytesN<32>> = env.storage().persistent().get(&event_key).unwrap_or(Vec::new(&e));
+        let mut event_escrows: Vec<BytesN<32>> = env.storage().persistent().get(&event_key).unwrap_or(Vec::new(&env));
         event_escrows.push_back(escrow_id.clone());
         env.storage().persistent().set(&event_key, &event_escrows);
 
         // Update user escrows
         let user_key = DataKey::UserEscrows(purchaser);
-        let mut user_escrows: Vec<BytesN<32>> = env.storage().persistent().get(&user_key).unwrap_or(Vec::new(&e));
+        let mut user_escrows: Vec<BytesN<32>> = env.storage().persistent().get(&user_key).unwrap_or(Vec::new(&env));
         user_escrows.push_back(escrow_id.clone());
         env.storage().persistent().set(&user_key, &user_escrows);
 
@@ -143,13 +154,13 @@ impl EscrowContract {
     // Lock escrow (transfer funds to contract)
     pub fn lock_escrow(env: Env, escrow_id: BytesN<32>) {
         // Reentrancy protection
-        set_reentrancy_guard(&e);
+        set_reentrancy_guard(&env);
 
         let mut escrow: Escrow = env.storage().instance().get(&DataKey::Escrow(escrow_id.clone()))
             .unwrap_or_else(|| panic!("escrow not found"));
 
         if escrow.status != EscrowStatus::Pending {
-            remove_reentrancy_guard(&e);
+            remove_reentrancy_guard(&env);
             panic!("invalid status");
         }
 
@@ -174,7 +185,7 @@ impl EscrowContract {
         escrow.status = EscrowStatus::Locked;
         env.storage().instance().set(&DataKey::Escrow(escrow_id.clone()), &escrow);
 
-        remove_reentrancy_guard(&e);
+        remove_reentrancy_guard(&env);
 
         #[allow(deprecated)]
         env.events().publish(
@@ -469,12 +480,12 @@ impl EscrowContract {
 
     // Admin functions
     pub fn pause(env: Env) {
-        require_admin(&e);
+        require_admin(&env);
         set_paused(&env, true);
     }
 
     pub fn unpause(env: Env) {
-        require_admin(&e);
+        require_admin(&env);
         set_paused(&env, false);
     }
 
@@ -493,12 +504,12 @@ impl EscrowContract {
 
     pub fn get_event_escrows(env: Env, event: Address) -> Vec<BytesN<32>> {
         env.storage().persistent().get(&DataKey::EventEscrows(event))
-            .unwrap_or(Vec::new(&e))
+            .unwrap_or(Vec::new(&env))
     }
 
     pub fn get_user_escrows(env: Env, user: Address) -> Vec<BytesN<32>> {
         env.storage().persistent().get(&DataKey::UserEscrows(user))
-            .unwrap_or(Vec::new(&e))
+            .unwrap_or(Vec::new(&env))
     }
 
     pub fn get_dispute(env: Env, escrow_id: BytesN<32>) -> Dispute {
@@ -521,7 +532,7 @@ impl EscrowContract {
     }
 
     pub fn version(env: Env) -> u32 {
-        read_version(&e)
+        read_version(&env)
     }
 
     // Helper functions

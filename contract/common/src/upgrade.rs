@@ -3,6 +3,15 @@ use soroban_sdk::{Address, BytesN, Env, Symbol};
 use crate::access::require_admin;
 use crate::storage::CommonDataKey;
 
+/// Schedules a contract WASM upgrade with a mandatory timelock.
+///
+/// # Arguments
+/// * `env` - The current contract environment.
+/// * `new_wasm_hash` - The hash of the new contract WASM binary.
+/// * `unlock_time` - The timestamp after which the upgrade can be executed.
+///
+/// # Panics
+/// Panics if the unlock time is not in the future or if caller is not the admin.
 pub fn schedule_upgrade(env: &Env, new_wasm_hash: BytesN<32>, unlock_time: u64) {
     require_admin(env);
 
@@ -21,6 +30,14 @@ pub fn schedule_upgrade(env: &Env, new_wasm_hash: BytesN<32>, unlock_time: u64) 
     );
 }
 
+/// Executes a previously scheduled contract WASM upgrade.
+///
+/// # Arguments
+/// * `env` - The current contract environment.
+/// * `new_wasm_hash` - The hash of the new contract WASM binary.
+///
+/// # Panics
+/// Panics if no upgrade was scheduled, if the hash doesn't match, or if the timelock hasn't expired.
 pub fn execute_upgrade(env: &Env, new_wasm_hash: BytesN<32>) {
     require_admin(env);
 
